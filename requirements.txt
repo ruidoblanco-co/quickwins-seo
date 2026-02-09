@@ -1,0 +1,8 @@
+streamlit
+google-generativeai
+beautifulsoup4
+requests
+lxml
+python-docx
+openpyxl
+anthropic
