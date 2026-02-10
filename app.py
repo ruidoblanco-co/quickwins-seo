@@ -18,6 +18,9 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.formatting.rule import FormulaRule
+from openpyxl.utils import get_column_letter
 
 
 # ===========================
@@ -954,15 +957,14 @@ def create_excel_report(audit_data: dict, site_name: str) -> BytesIO:
 
     # Styles
     header_font = Font(bold=True, color="FFFFFF", size=12)
-    header_fill = PatternFill(start_color="1e3a5f", end_color="1e3a5f", fill_type="solid")
-    subheader_font = Font(bold=True, color="1e3a5f", size=11)
-    link_font = Font(color="2563eb", underline="single")
+    header_fill = PatternFill(start_color="1e3a8a", end_color="1e3a8a", fill_type="solid")
     thin_border = Border(
-        left=Side(style="thin", color="d1d5db"),
-        right=Side(style="thin", color="d1d5db"),
-        top=Side(style="thin", color="d1d5db"),
-        bottom=Side(style="thin", color="d1d5db"),
+        left=Side(style="thin", color="000000"),
+        right=Side(style="thin", color="000000"),
+        top=Side(style="thin", color="000000"),
+        bottom=Side(style="thin", color="000000"),
     )
+    green_fill = PatternFill(start_color="d1fae5", end_color="d1fae5", fill_type="solid")
 
     def style_header_row(ws, row_num, col_count):
         for col in range(1, col_count + 1):
@@ -971,88 +973,94 @@ def create_excel_report(audit_data: dict, site_name: str) -> BytesIO:
             cell.fill = header_fill
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell.border = thin_border
+        ws.row_dimensions[row_num].height = 30
 
-    def style_cell(ws, row_num, col_num, wrap=True):
+    def style_data_cell(ws, row_num, col_num):
         cell = ws.cell(row=row_num, column=col_num)
         cell.border = thin_border
-        cell.alignment = Alignment(vertical="top", wrap_text=wrap)
+        cell.alignment = Alignment(vertical="top", wrap_text=True)
         return cell
 
-    # --- Sheet 1: Quick Wins ---
-    ws_qw = wb.active
-    ws_qw.title = "Quick Wins"
-    headers_qw = ["#", "Action", "Impact", "Description"]
-    ws_qw.append(headers_qw)
-    style_header_row(ws_qw, 1, len(headers_qw))
+    def build_issues_sheet(ws, items):
+        """Build a Critical Errors or Warnings sheet with checkbox column."""
+        headers = ["\u2713 Done", "Issue", "Description", "Evidence", "URLs",
+                   "Why It Matters", "How to Fix"]
+        ws.append(headers)
+        style_header_row(ws, 1, len(headers))
 
-    for i, qw in enumerate(audit_data.get("quick_wins", []), 1):
-        row = [i, qw.get("title", ""), qw.get("impact", ""), qw.get("description", "")]
-        ws_qw.append(row)
-        for c in range(1, len(row) + 1):
-            style_cell(ws_qw, i + 1, c)
+        for i, item in enumerate(items, 1):
+            row_num = i + 1
+            urls_str = "\n".join(item.get("urls", []))
+            row = [
+                "\u2610",
+                item.get("title", ""),
+                item.get("description", ""),
+                item.get("evidence", ""),
+                urls_str,
+                item.get("why_it_matters", ""),
+                item.get("how_to_fix", ""),
+            ]
+            ws.append(row)
+            for c in range(1, len(row) + 1):
+                style_data_cell(ws, row_num, c)
+            ws.row_dimensions[row_num].height = 60
 
-    ws_qw.column_dimensions["A"].width = 5
-    ws_qw.column_dimensions["B"].width = 40
-    ws_qw.column_dimensions["C"].width = 12
-    ws_qw.column_dimensions["D"].width = 60
+        # Checkbox dropdown validation on column A (data rows)
+        if len(items) > 0:
+            dv = DataValidation(
+                type="list",
+                formula1='"\u2610,\u2611"',
+                allow_blank=False,
+            )
+            dv.error = "Please select a valid option"
+            dv.errorTitle = "Invalid input"
+            last_row = len(items) + 1
+            dv.add(f"A2:A{last_row}")
+            ws.add_data_validation(dv)
 
-    # --- Sheet 2: Critical Errors ---
-    ws_ce = wb.create_sheet("Critical Errors")
-    headers_ce = ["Issue", "Description", "Evidence", "URLs", "Why It Matters", "How to Fix"]
-    ws_ce.append(headers_ce)
-    style_header_row(ws_ce, 1, len(headers_ce))
+            # Conditional formatting: green row when checked
+            for col_idx in range(1, len(headers) + 1):
+                col_letter = get_column_letter(col_idx)
+                cell_range = f"{col_letter}2:{col_letter}{last_row}"
+                ws.conditional_formatting.add(
+                    cell_range,
+                    FormulaRule(
+                        formula=[f'$A2="\u2611"'],
+                        fill=green_fill,
+                    ),
+                )
 
-    for i, err in enumerate(audit_data.get("critical_errors", []), 1):
-        urls_str = "\n".join(err.get("urls", []))
-        row = [
-            err.get("title", ""),
-            err.get("description", ""),
-            err.get("evidence", ""),
-            urls_str,
-            err.get("why_it_matters", ""),
-            err.get("how_to_fix", ""),
-        ]
-        ws_ce.append(row)
-        for c in range(1, len(row) + 1):
-            style_cell(ws_ce, i + 1, c)
+        # Column widths
+        ws.column_dimensions["A"].width = 8
+        ws.column_dimensions["B"].width = 30
+        ws.column_dimensions["C"].width = 35
+        ws.column_dimensions["D"].width = 35
+        ws.column_dimensions["E"].width = 50
+        ws.column_dimensions["F"].width = 35
+        ws.column_dimensions["G"].width = 40
 
-    for col_letter, width in [("A", 30), ("B", 35), ("C", 35), ("D", 50), ("E", 35), ("F", 40)]:
-        ws_ce.column_dimensions[col_letter].width = width
+    # --- Sheet 1: Critical Errors ---
+    ws_ce = wb.active
+    ws_ce.title = "Critical Errors"
+    build_issues_sheet(ws_ce, audit_data.get("critical_errors", []))
 
-    # --- Sheet 3: Warnings ---
+    # --- Sheet 2: Warnings ---
     ws_w = wb.create_sheet("Warnings")
-    headers_w = ["Issue", "Description", "Evidence", "URLs", "Why It Matters", "How to Fix"]
-    ws_w.append(headers_w)
-    style_header_row(ws_w, 1, len(headers_w))
+    build_issues_sheet(ws_w, audit_data.get("warnings", []))
 
-    for i, warn in enumerate(audit_data.get("warnings", []), 1):
-        urls_str = "\n".join(warn.get("urls", []))
-        row = [
-            warn.get("title", ""),
-            warn.get("description", ""),
-            warn.get("evidence", ""),
-            urls_str,
-            warn.get("why_it_matters", ""),
-            warn.get("how_to_fix", ""),
-        ]
-        ws_w.append(row)
-        for c in range(1, len(row) + 1):
-            style_cell(ws_w, i + 1, c)
-
-    for col_letter, width in [("A", 30), ("B", 35), ("C", 35), ("D", 50), ("E", 35), ("F", 40)]:
-        ws_w.column_dimensions[col_letter].width = width
-
-    # --- Sheet 4: Next Checks ---
+    # --- Sheet 3: Next Checks ---
     ws_nc = wb.create_sheet("Next Checks")
     headers_nc = ["Check", "Description"]
     ws_nc.append(headers_nc)
     style_header_row(ws_nc, 1, len(headers_nc))
 
     for i, nc in enumerate(audit_data.get("next_checks", []), 1):
+        row_num = i + 1
         row = [nc.get("title", ""), nc.get("description", "")]
         ws_nc.append(row)
         for c in range(1, len(row) + 1):
-            style_cell(ws_nc, i + 1, c)
+            style_data_cell(ws_nc, row_num, c)
+        ws_nc.row_dimensions[row_num].height = 60
 
     ws_nc.column_dimensions["A"].width = 35
     ws_nc.column_dimensions["B"].width = 70
