@@ -16,6 +16,8 @@ from pathlib import Path
 from urllib.parse import urlparse, urljoin
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 
 # ===========================
@@ -70,7 +72,7 @@ try:
         logger.warning("GOOGLE_API_KEY not found in secrets")
 except Exception as e:
     GEMINI_AVAILABLE = False
-    logger.error("Failed to configure Gemini API: %s", e)
+    logger.error("Failed to configure API: %s", e)
 
 
 # ===========================
@@ -79,11 +81,11 @@ except Exception as e:
 st.markdown("""
 <style>
     .stApp {
-        background: linear-gradient(135deg, #2b2d42 0%, #1a1b26 100%);
+        background: #0f172a;
     }
 
     [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #1a1b26 0%, #121318 100%);
+        background: linear-gradient(180deg, #0f172a 0%, #020617 100%);
     }
 
     [data-testid="stMetricValue"] {
@@ -124,28 +126,8 @@ st.markdown("""
         font-size: 14px;
     }
 
-    .stSelectbox>div>div>div {
-        background-color: rgba(255, 255, 255, 0.05);
-        color: white;
-        border-radius: 6px;
-        font-size: 14px;
-    }
-
-    .stRadio>div {
-        background-color: rgba(255, 255, 255, 0.03);
-        padding: 12px;
-        border-radius: 6px;
-        border: 1px solid rgba(96, 165, 250, 0.2);
-    }
-
-    h1 {
-        color: #60a5fa;
-        font-weight: 700;
-    }
-
-    h2, h3 {
-        color: #e2e8f0;
-    }
+    h1 { color: #60a5fa; font-weight: 700; }
+    h2, h3 { color: #e2e8f0; }
 
     .app-header {
         text-align: center;
@@ -153,7 +135,6 @@ st.markdown("""
         margin-bottom: 30px;
         border-bottom: 2px solid rgba(96, 165, 250, 0.2);
     }
-
     .app-title {
         font-size: 48px;
         font-weight: 700;
@@ -161,7 +142,6 @@ st.markdown("""
         margin: 10px 0 5px 0;
         letter-spacing: -1px;
     }
-
     .app-subtitle {
         font-size: 17px;
         color: #94a3b8;
@@ -171,6 +151,196 @@ st.markdown("""
         margin: 0 auto;
     }
 
+    /* Audit header banner */
+    .audit-banner {
+        background: linear-gradient(135deg, #1e3a5f 0%, #1e293b 100%);
+        padding: 28px 32px;
+        border-radius: 12px;
+        margin-bottom: 28px;
+        border: 1px solid rgba(96, 165, 250, 0.2);
+    }
+    .audit-banner h2 {
+        color: #f8fafc;
+        font-size: 28px;
+        font-weight: 700;
+        margin: 0;
+    }
+
+    /* Info boxes (Executive Summary, Scope) */
+    .info-box {
+        background: rgba(30, 41, 59, 0.8);
+        border: 1px solid rgba(96, 165, 250, 0.2);
+        border-radius: 10px;
+        padding: 24px 28px;
+        margin-bottom: 24px;
+        line-height: 1.8;
+        color: #cbd5e1;
+    }
+    .info-box h3 {
+        color: #93c5fd;
+        font-size: 18px;
+        font-weight: 600;
+        margin: 0 0 12px 0;
+    }
+    .info-box p {
+        margin: 0 0 8px 0;
+        color: #cbd5e1;
+        font-size: 15px;
+    }
+
+    /* Section headers */
+    .section-header {
+        font-size: 22px;
+        font-weight: 700;
+        margin: 32px 0 16px 0;
+        color: #f8fafc;
+    }
+    .section-subtitle {
+        color: #94a3b8;
+        font-size: 14px;
+        margin: -10px 0 20px 0;
+    }
+
+    /* Quick Win cards */
+    .qw-card {
+        background: rgba(30, 41, 59, 0.7);
+        border-left: 4px solid #f59e0b;
+        border-radius: 8px;
+        padding: 18px 22px;
+        margin-bottom: 12px;
+        transition: background 0.2s;
+    }
+    .qw-card:hover {
+        background: rgba(30, 41, 59, 0.95);
+    }
+    .qw-number {
+        display: inline-block;
+        background: #f59e0b;
+        color: #0f172a;
+        font-weight: 700;
+        font-size: 13px;
+        width: 24px;
+        height: 24px;
+        line-height: 24px;
+        text-align: center;
+        border-radius: 4px;
+        margin-right: 10px;
+    }
+    .qw-title {
+        font-size: 16px;
+        font-weight: 600;
+        color: #fbbf24;
+        display: inline;
+    }
+    .qw-meta {
+        color: #94a3b8;
+        font-size: 13px;
+        margin-top: 6px;
+        padding-left: 34px;
+    }
+
+    /* Error / Warning cards inside expanders */
+    .issue-card {
+        background: rgba(15, 23, 42, 0.6);
+        border-radius: 8px;
+        padding: 18px 22px;
+        margin-bottom: 14px;
+        border: 1px solid rgba(100, 116, 139, 0.2);
+    }
+    .issue-card h4 {
+        color: #f8fafc;
+        font-size: 15px;
+        font-weight: 600;
+        margin: 0 0 8px 0;
+    }
+    .issue-card p {
+        color: #94a3b8;
+        font-size: 14px;
+        margin: 4px 0;
+        line-height: 1.6;
+    }
+    .issue-urls {
+        color: #60a5fa;
+        font-size: 13px;
+        font-family: monospace;
+        margin-top: 8px;
+        word-break: break-all;
+    }
+    .issue-urls a {
+        color: #60a5fa;
+        text-decoration: none;
+    }
+    .issue-urls a:hover {
+        text-decoration: underline;
+    }
+    .issue-detail-label {
+        color: #93c5fd;
+        font-weight: 600;
+        font-size: 13px;
+        margin-top: 10px;
+        margin-bottom: 2px;
+    }
+    .issue-detail-text {
+        color: #cbd5e1;
+        font-size: 14px;
+        line-height: 1.6;
+    }
+    .more-in-excel {
+        color: #f59e0b;
+        font-size: 13px;
+        font-style: italic;
+        margin-top: 6px;
+    }
+
+    /* Next checks cards */
+    .next-card {
+        background: rgba(30, 41, 59, 0.5);
+        border: 1px solid rgba(96, 165, 250, 0.15);
+        border-radius: 8px;
+        padding: 16px 20px;
+        margin-bottom: 10px;
+    }
+    .next-card h4 {
+        color: #93c5fd;
+        font-size: 15px;
+        font-weight: 600;
+        margin: 0 0 6px 0;
+    }
+    .next-card p {
+        color: #94a3b8;
+        font-size: 14px;
+        margin: 0;
+        line-height: 1.5;
+    }
+
+    /* Action buttons row */
+    .btn-excel > button {
+        background: linear-gradient(90deg, #f59e0b 0%, #d97706 100%) !important;
+        color: #0f172a !important;
+        font-weight: 700 !important;
+    }
+    .btn-excel > button:hover {
+        box-shadow: 0 6px 12px rgba(245, 158, 11, 0.3) !important;
+    }
+    .btn-new-audit > button {
+        background: transparent !important;
+        border: 2px solid #60a5fa !important;
+        color: #60a5fa !important;
+        font-weight: 600 !important;
+    }
+    .btn-new-audit > button:hover {
+        background: rgba(96, 165, 250, 0.1) !important;
+    }
+
+    /* Expander styling */
+    .streamlit-expanderHeader {
+        background: rgba(30, 41, 59, 0.8) !important;
+        border-radius: 8px !important;
+        color: #f8fafc !important;
+        font-weight: 600 !important;
+    }
+
+    /* Status badges */
     .status-badge {
         display: inline-block;
         padding: 4px 12px;
@@ -179,51 +349,19 @@ st.markdown("""
         font-weight: 600;
         margin: 4px;
     }
-
     .status-connected {
         background-color: rgba(34, 197, 94, 0.2);
         color: #22c55e;
         border: 1px solid #22c55e;
     }
-
     .status-disconnected {
         background-color: rgba(239, 68, 68, 0.2);
         color: #ef4444;
         border: 1px solid #ef4444;
     }
 
-    .audit-report {
-        background-color: rgba(255, 255, 255, 0.03);
-        padding: 30px;
-        border-radius: 8px;
-        border: 1px solid rgba(96, 165, 250, 0.2);
-        line-height: 1.8;
-    }
-
-    .audit-report h1 {
-        color: #60a5fa;
-        border-bottom: 2px solid rgba(96, 165, 250, 0.3);
-        padding-bottom: 10px;
-        margin-bottom: 20px;
-    }
-
-    .audit-report h2 {
-        color: #93c5fd;
-        margin-top: 30px;
-        margin-bottom: 15px;
-    }
-
-    .audit-report h3 {
-        color: #bfdbfe;
-        margin-top: 20px;
-        margin-bottom: 10px;
-    }
-
-    .stRadio label, .stSelectbox label {
-        font-size: 13px;
-        color: #94a3b8;
-        font-weight: 500;
-    }
+    /* Hide Streamlit default footer */
+    footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -772,10 +910,10 @@ def run_basic_audit(url_input: str) -> dict:
 
 
 # ===========================
-# AI (Gemini only)
+# AI
 # ===========================
 def run_llm(prompt_text: str) -> str:
-    model = genai.GenerativeModel("gemini-3-flash-preview")
+    model = genai.GenerativeModel("gemini-2.5-flash-preview-05-20")
     resp = model.generate_content(prompt_text)
     return (getattr(resp, "text", "") or "").strip()
 
@@ -785,14 +923,149 @@ def build_prompt(context: dict) -> str:
     if not p:
         p = (
             "You are a senior SEO auditor.\n"
-            "Return ONLY Markdown with findings and evidence.\n"
+            "Return ONLY valid JSON with findings and evidence.\n"
             "CONTEXT_JSON:\n{{CONTEXT_JSON}}\n"
         )
     return p.replace("{{CONTEXT_JSON}}", json.dumps(context, ensure_ascii=False, indent=2))
 
 
+def parse_audit_json(raw: str) -> dict:
+    """Parse the JSON response from the LLM, handling code fences."""
+    cleaned = strip_json_fences(raw)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Try to find JSON object in the response
+        match = re.search(r'\{[\s\S]*\}', cleaned)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+    return {}
+
+
 # ===========================
-# DOCX GENERATION (Markdown to docx)
+# EXCEL GENERATION
+# ===========================
+def create_excel_report(audit_data: dict, site_name: str) -> BytesIO:
+    """Create a comprehensive Excel report from audit data."""
+    wb = Workbook()
+
+    # Styles
+    header_font = Font(bold=True, color="FFFFFF", size=12)
+    header_fill = PatternFill(start_color="1e3a5f", end_color="1e3a5f", fill_type="solid")
+    subheader_font = Font(bold=True, color="1e3a5f", size=11)
+    link_font = Font(color="2563eb", underline="single")
+    thin_border = Border(
+        left=Side(style="thin", color="d1d5db"),
+        right=Side(style="thin", color="d1d5db"),
+        top=Side(style="thin", color="d1d5db"),
+        bottom=Side(style="thin", color="d1d5db"),
+    )
+
+    def style_header_row(ws, row_num, col_count):
+        for col in range(1, col_count + 1):
+            cell = ws.cell(row=row_num, column=col)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = thin_border
+
+    def style_cell(ws, row_num, col_num, wrap=True):
+        cell = ws.cell(row=row_num, column=col_num)
+        cell.border = thin_border
+        cell.alignment = Alignment(vertical="top", wrap_text=wrap)
+        return cell
+
+    # --- Sheet 1: Quick Wins ---
+    ws_qw = wb.active
+    ws_qw.title = "Quick Wins"
+    headers_qw = ["#", "Action", "Impact", "Description"]
+    ws_qw.append(headers_qw)
+    style_header_row(ws_qw, 1, len(headers_qw))
+
+    for i, qw in enumerate(audit_data.get("quick_wins", []), 1):
+        row = [i, qw.get("title", ""), qw.get("impact", ""), qw.get("description", "")]
+        ws_qw.append(row)
+        for c in range(1, len(row) + 1):
+            style_cell(ws_qw, i + 1, c)
+
+    ws_qw.column_dimensions["A"].width = 5
+    ws_qw.column_dimensions["B"].width = 40
+    ws_qw.column_dimensions["C"].width = 12
+    ws_qw.column_dimensions["D"].width = 60
+
+    # --- Sheet 2: Critical Errors ---
+    ws_ce = wb.create_sheet("Critical Errors")
+    headers_ce = ["Issue", "Description", "Evidence", "URLs", "Why It Matters", "How to Fix"]
+    ws_ce.append(headers_ce)
+    style_header_row(ws_ce, 1, len(headers_ce))
+
+    for i, err in enumerate(audit_data.get("critical_errors", []), 1):
+        urls_str = "\n".join(err.get("urls", []))
+        row = [
+            err.get("title", ""),
+            err.get("description", ""),
+            err.get("evidence", ""),
+            urls_str,
+            err.get("why_it_matters", ""),
+            err.get("how_to_fix", ""),
+        ]
+        ws_ce.append(row)
+        for c in range(1, len(row) + 1):
+            style_cell(ws_ce, i + 1, c)
+
+    for col_letter, width in [("A", 30), ("B", 35), ("C", 35), ("D", 50), ("E", 35), ("F", 40)]:
+        ws_ce.column_dimensions[col_letter].width = width
+
+    # --- Sheet 3: Warnings ---
+    ws_w = wb.create_sheet("Warnings")
+    headers_w = ["Issue", "Description", "Evidence", "URLs", "Why It Matters", "How to Fix"]
+    ws_w.append(headers_w)
+    style_header_row(ws_w, 1, len(headers_w))
+
+    for i, warn in enumerate(audit_data.get("warnings", []), 1):
+        urls_str = "\n".join(warn.get("urls", []))
+        row = [
+            warn.get("title", ""),
+            warn.get("description", ""),
+            warn.get("evidence", ""),
+            urls_str,
+            warn.get("why_it_matters", ""),
+            warn.get("how_to_fix", ""),
+        ]
+        ws_w.append(row)
+        for c in range(1, len(row) + 1):
+            style_cell(ws_w, i + 1, c)
+
+    for col_letter, width in [("A", 30), ("B", 35), ("C", 35), ("D", 50), ("E", 35), ("F", 40)]:
+        ws_w.column_dimensions[col_letter].width = width
+
+    # --- Sheet 4: Next Checks ---
+    ws_nc = wb.create_sheet("Next Checks")
+    headers_nc = ["Check", "Description"]
+    ws_nc.append(headers_nc)
+    style_header_row(ws_nc, 1, len(headers_nc))
+
+    for i, nc in enumerate(audit_data.get("next_checks", []), 1):
+        row = [nc.get("title", ""), nc.get("description", "")]
+        ws_nc.append(row)
+        for c in range(1, len(row) + 1):
+            style_cell(ws_nc, i + 1, c)
+
+    ws_nc.column_dimensions["A"].width = 35
+    ws_nc.column_dimensions["B"].width = 70
+
+    # Save
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+# ===========================
+# DOCX GENERATION (Markdown to docx) - kept for compatibility
 # ===========================
 def create_word_from_content(audit_content: str, site_name: str) -> BytesIO:
     doc = Document()
@@ -838,6 +1111,41 @@ def create_word_from_content(audit_content: str, site_name: str) -> BytesIO:
 
 
 # ===========================
+# UI RENDERING FUNCTIONS
+# ===========================
+def render_issue_card(issue: dict, max_urls: int = 3):
+    """Render a single issue card (for critical errors or warnings)."""
+    title = issue.get("title", "Untitled Issue")
+    desc = issue.get("description", "")
+    evidence = issue.get("evidence", "")
+    urls = issue.get("urls", [])
+    why = issue.get("why_it_matters", "")
+    fix = issue.get("how_to_fix", "")
+
+    urls_html = ""
+    visible_urls = urls[:max_urls]
+    for u in visible_urls:
+        urls_html += f'<a href="{u}" target="_blank">{u}</a><br>'
+
+    remaining = len(urls) - max_urls
+    more_html = ""
+    if remaining > 0:
+        more_html = f'<p class="more-in-excel">+{remaining} more URLs — see the downloadable Excel for the full list</p>'
+
+    st.markdown(f"""
+    <div class="issue-card">
+        <h4>{title}</h4>
+        <p>{desc}</p>
+        {f'<p><strong>Evidence:</strong> {evidence}</p>' if evidence else ''}
+        {f'<div class="issue-urls">{urls_html}</div>' if urls_html else ''}
+        {more_html}
+        {f'<p class="issue-detail-label">Why it matters</p><p class="issue-detail-text">{why}</p>' if why else ''}
+        {f'<p class="issue-detail-label">How to fix</p><p class="issue-detail-text">{fix}</p>' if fix else ''}
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ===========================
 # SIDEBAR
 # ===========================
 with st.sidebar:
@@ -845,12 +1153,12 @@ with st.sidebar:
 
     if GEMINI_AVAILABLE:
         st.markdown(
-            '<span class="status-badge status-connected">Gemini Connected</span>',
+            '<span class="status-badge status-connected">&#10003; AI Connected</span>',
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            '<span class="status-badge status-disconnected">Gemini Offline</span>',
+            '<span class="status-badge status-disconnected">&#10007; AI Offline</span>',
             unsafe_allow_html=True,
         )
 
@@ -863,12 +1171,12 @@ with st.sidebar:
     **Features**:
     - Lightweight site crawl (robots + sitemap)
     - On-page signal analysis
-    - AI-powered insights (Gemini)
-    - Downloadable Word reports
+    - AI-powered insights
+    - Downloadable Excel reports
     """)
 
     st.markdown("---")
-    st.caption("v3.0")
+    st.caption("v4.0")
 
 
 # ===========================
@@ -901,7 +1209,7 @@ col1, col2, col3 = st.columns([1, 2, 1])
 with col2:
     if st.button("Audit Now!", disabled=not url_input, use_container_width=True):
         if not GEMINI_AVAILABLE:
-            st.error("Gemini API is not configured. Add GOOGLE_API_KEY to your Streamlit secrets.")
+            st.error("AI engine is not configured. Please check the system configuration.")
             st.stop()
 
         # Validate URL
@@ -939,7 +1247,7 @@ with col2:
             st.stop()
 
         # Step 2: Generate AI content
-        status_text.text("Generating audit content with Gemini...")
+        status_text.text("Analyzing data and generating insights...")
         progress_bar.progress(60)
 
         context = audit_context.copy()
@@ -947,17 +1255,22 @@ with col2:
 
         try:
             prompt_text = build_prompt(context)
-            audit_content = run_llm(prompt_text)
+            raw_response = run_llm(prompt_text)
+            audit_data = parse_audit_json(raw_response)
         except Exception as e:
             logger.error("AI generation failed: %s", e)
-            st.error(f"AI generation failed: {e}")
+            st.error(f"AI analysis failed: {e}")
             st.stop()
 
-        # Step 3: Create document
-        status_text.text("Creating report document...")
+        if not audit_data:
+            st.error("Could not parse audit results. Please try again.")
+            st.stop()
+
+        # Step 3: Create Excel
+        status_text.text("Creating report...")
         progress_bar.progress(85)
 
-        doc_file = create_word_from_content(audit_content, site_name)
+        excel_file = create_excel_report(audit_data, site_name)
 
         progress_bar.progress(100)
         status_text.text("Complete!")
@@ -966,40 +1279,101 @@ with col2:
         progress_bar.empty()
         status_text.empty()
 
-        # Results
+        # ===========================
+        # RESULTS DISPLAY
+        # ===========================
+
+        # --- Audit Banner ---
+        st.markdown(f"""
+        <div class="audit-banner">
+            <h2>SEO AUDIT — {site_name}</h2>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # --- Executive Summary ---
+        exec_summary = audit_data.get("executive_summary", "")
+        if exec_summary:
+            st.markdown(f"""
+            <div class="info-box">
+                <h3>Executive Summary</h3>
+                <p>{exec_summary}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # --- Audit Scope & Method ---
+        scope = audit_data.get("audit_scope", {})
+        if scope:
+            scope_html = f"""
+            <div class="info-box">
+                <h3>Audit Scope &amp; Method</h3>
+                <p><strong>URLs discovered:</strong> {scope.get('urls_discovered', 'N/A')}</p>
+                <p><strong>URLs analyzed:</strong> {scope.get('urls_analyzed', 'N/A')}</p>
+                <p><strong>Discovery method:</strong> {scope.get('discovery_method', 'N/A')}</p>
+                <p><strong>Limitations:</strong> {scope.get('limitations', 'N/A')}</p>
+            </div>
+            """
+            st.markdown(scope_html, unsafe_allow_html=True)
+
+        # --- Quick Wins ---
+        quick_wins = audit_data.get("quick_wins", [])
+        if quick_wins:
+            st.markdown('<div class="section-header">&#9889; QUICK WINS</div>', unsafe_allow_html=True)
+            st.markdown('<p class="section-subtitle">The 5 most impactful improvements you can make right now</p>', unsafe_allow_html=True)
+
+            for i, qw in enumerate(quick_wins[:5], 1):
+                title = qw.get("title", "")
+                impact = qw.get("impact", "")
+                desc = qw.get("description", "")
+                st.markdown(f"""
+                <div class="qw-card">
+                    <span class="qw-number">{i}</span>
+                    <span class="qw-title">{title}</span>
+                    <div class="qw-meta">Impact: {impact} &bull; {desc}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # --- Critical Errors ---
+        critical = audit_data.get("critical_errors", [])
+        if critical:
+            with st.expander(f"🚨 CRITICAL ERRORS — {len(critical)} issues", expanded=False):
+                for err in critical:
+                    render_issue_card(err, max_urls=3)
+
+        # --- Warnings ---
+        warnings = audit_data.get("warnings", [])
+        if warnings:
+            with st.expander(f"⚠️ WARNINGS — {len(warnings)} issues", expanded=False):
+                for warn in warnings:
+                    render_issue_card(warn, max_urls=3)
+
+        # --- Next Checks ---
+        next_checks = audit_data.get("next_checks", [])
+        if next_checks:
+            st.markdown('<div class="section-header">&#128270; NEXT CHECKS</div>', unsafe_allow_html=True)
+            st.markdown('<p class="section-subtitle">Deeper analysis to unlock more improvements</p>', unsafe_allow_html=True)
+
+            for nc in next_checks:
+                st.markdown(f"""
+                <div class="next-card">
+                    <h4>{nc.get('title', '')}</h4>
+                    <p>{nc.get('description', '')}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # --- Action Buttons ---
         st.markdown("---")
-        st.success("Audit completed successfully!")
 
-        tab1, tab2 = st.tabs(["Preview", "Download"])
+        btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
 
-        with tab1:
-            st.markdown('<div class="audit-report">', unsafe_allow_html=True)
-            st.markdown(audit_content)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        with tab2:
-            st.markdown("### Download Your Report")
+        with btn_col1:
             st.download_button(
-                label="Download Report (.docx)",
-                data=doc_file,
-                file_name=f"SEO_Audit_{site_name}_{datetime.now().strftime('%Y%m%d')}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                label="📥 Download Excel",
+                data=excel_file,
+                file_name=f"SEO_Audit_{site_name}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
 
-
-# Footer
-st.markdown("---")
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    st.markdown("**Quick Wins**")
-    st.caption("SEO audits in seconds")
-
-with col2:
-    st.markdown("**Powered by**")
-    st.caption("Google Gemini")
-
-with col3:
-    st.markdown("**Need help?**")
-    st.caption("[Documentation](#) | [Support](#)")
+        with btn_col2:
+            if st.button("🔄 New Audit", use_container_width=True):
+                st.rerun()
