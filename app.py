@@ -913,7 +913,7 @@ def run_basic_audit(url_input: str) -> dict:
 # AI
 # ===========================
 def run_llm(prompt_text: str) -> str:
-    model = genai.GenerativeModel("gemini-2.5-flash-preview-05-20")
+    model = genai.GenerativeModel("gemini-3-flash-preview")
     resp = model.generate_content(prompt_text)
     return (getattr(resp, "text", "") or "").strip()
 
