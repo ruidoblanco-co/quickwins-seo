@@ -1,6 +1,7 @@
 import streamlit as st
 import time
 import logging
+import html as html_module
 from datetime import datetime
 import requests
 from requests.adapters import HTTPAdapter
@@ -465,6 +466,28 @@ def safe_int(x, default=0):
         return default
 
 
+def clean_text(text: str) -> str:
+    """Decode HTML entities and strip residual HTML tags from text."""
+    if not text or not isinstance(text, str):
+        return text or ""
+    # Decode HTML entities like &lt;p&gt; → <p>
+    cleaned = html_module.unescape(text)
+    # Strip any residual HTML tags
+    cleaned = re.sub(r"<[^>]+>", "", cleaned)
+    return cleaned.strip()
+
+
+def clean_audit_data(data):
+    """Recursively clean all string values in the audit data structure."""
+    if isinstance(data, str):
+        return clean_text(data)
+    if isinstance(data, list):
+        return [clean_audit_data(item) for item in data]
+    if isinstance(data, dict):
+        return {k: clean_audit_data(v) for k, v in data.items()}
+    return data
+
+
 # ===========================
 # WEB ANALYSIS (single page snapshot)
 # ===========================
@@ -481,8 +504,6 @@ def analyze_basic_site(url: str) -> dict:
             "meta_description": "",
             "h1_tags": [],
             "h2_tags": [],
-            "images_without_alt": 0,
-            "total_images": 0,
             "internal_links": 0,
             "external_links": 0,
             "word_count": 0,
@@ -494,10 +515,6 @@ def analyze_basic_site(url: str) -> dict:
 
         analysis["h1_tags"] = [h1.get_text(" ", strip=True) for h1 in soup.find_all("h1")]
         analysis["h2_tags"] = [h2.get_text(" ", strip=True) for h2 in soup.find_all("h2")][:5]
-
-        images = soup.find_all("img")
-        analysis["total_images"] = len(images)
-        analysis["images_without_alt"] = sum(1 for img in images if not img.get("alt"))
 
         for link in soup.find_all("a", href=True):
             href = link["href"].strip()
@@ -553,6 +570,7 @@ def try_default_sitemaps(base_url: str) -> list[str]:
         urljoin(base, "sitemap.xml"),
         urljoin(base, "sitemap_index.xml"),
         urljoin(base, "sitemap-index.xml"),
+        urljoin(base, "sitemap1.xml"),
     ]
 
 
@@ -664,10 +682,6 @@ def extract_page_signals(url: str, base_domain: str) -> dict:
     text = soup.get_text(" ", strip=True)
     word_count = len(text.split())
 
-    imgs = soup.find_all("img")
-    images_total = len(imgs)
-    images_missing_alt = sum(1 for img in imgs if not (img.get("alt") or "").strip())
-
     hreflang_tags = soup.find_all("link", attrs={
         "rel": lambda x: x and "alternate" in x.lower(), "hreflang": True
     })
@@ -699,8 +713,6 @@ def extract_page_signals(url: str, base_domain: str) -> dict:
         "robots_meta": robots_meta,
         "h1_count": h1_count,
         "word_count": word_count,
-        "images_total": images_total,
-        "images_missing_alt": images_missing_alt,
         "hreflang_count": hreflang_count,
         "jsonld_count": jsonld_count,
         "sample_internal_links": internal_links,
@@ -742,7 +754,6 @@ def build_site_level_findings(pages: list[dict], base_domain: str) -> tuple[dict
         "missing_canonical": 0,
         "canonical_mismatch": 0,
         "thin_pages": 0,
-        "total_images_missing_alt": 0,
         "pages_with_schema": 0,
         "pages_with_hreflang": 0,
     }
@@ -814,7 +825,6 @@ def build_site_level_findings(pages: list[dict], base_domain: str) -> tuple[dict
             if len(examples["thin_examples"]) < 10:
                 examples["thin_examples"].append({"url": url, "word_count": wc})
 
-        summary["total_images_missing_alt"] += safe_int(p.get("images_missing_alt"), 0)
         if safe_int(p.get("jsonld_count"), 0) > 0:
             summary["pages_with_schema"] += 1
         if safe_int(p.get("hreflang_count"), 0) > 0:
@@ -850,9 +860,16 @@ def run_basic_audit(url_input: str) -> dict:
 
     logger.info("Starting audit for %s", base_domain)
 
-    sitemaps = get_robots_sitemaps(base_url)
-    if not sitemaps:
-        sitemaps = try_default_sitemaps(base_url)
+    # Gather sitemaps from robots.txt first, then try common default paths as fallback
+    robots_sitemaps = get_robots_sitemaps(base_url)
+    default_sitemaps = try_default_sitemaps(base_url)
+    # Combine: robots.txt sitemaps first, then defaults (deduplicated)
+    seen = set()
+    sitemaps = []
+    for sm in robots_sitemaps + default_sitemaps:
+        if sm not in seen:
+            seen.add(sm)
+            sitemaps.append(sm)
 
     discovered_urls = []
     used_sitemap = None
@@ -933,19 +950,72 @@ def build_prompt(context: dict) -> str:
 
 
 def parse_audit_json(raw: str) -> dict:
-    """Parse the JSON response from the LLM, handling code fences."""
+    """Parse the JSON response from the LLM, handling code fences and HTML entities."""
     cleaned = strip_json_fences(raw)
+    result = {}
     try:
-        return json.loads(cleaned)
+        result = json.loads(cleaned)
     except json.JSONDecodeError:
         # Try to find JSON object in the response
         match = re.search(r'\{[\s\S]*\}', cleaned)
         if match:
             try:
-                return json.loads(match.group())
+                result = json.loads(match.group())
             except json.JSONDecodeError:
                 pass
-    return {}
+    # Clean all string values of HTML entities and residual tags
+    return clean_audit_data(result)
+
+
+_ALT_TEXT_PATTERN = re.compile(r"\balt[\s-]*(text|attribute|tag|imagen)", re.IGNORECASE)
+
+
+def _is_alt_text_issue(item: dict) -> bool:
+    """Return True if the issue is about missing image alt text."""
+    text = " ".join([
+        item.get("title", ""),
+        item.get("description", ""),
+    ])
+    return bool(_ALT_TEXT_PATTERN.search(text))
+
+
+def filter_alt_text_issues(audit_data: dict) -> dict:
+    """Remove any alt-text related issues from all sections."""
+    for key in ("critical_errors", "warnings", "quick_wins"):
+        items = audit_data.get(key, [])
+        if items:
+            audit_data[key] = [i for i in items if not _is_alt_text_issue(i)]
+    return audit_data
+
+
+def ensure_quick_win_completeness(audit_data: dict) -> dict:
+    """Ensure every Quick Win has a corresponding entry in Critical Errors or Warnings.
+
+    If a Quick Win has no matching detail entry, remove it so users never see
+    a Quick Win they can't find details for.
+    """
+    detail_titles = set()
+    for key in ("critical_errors", "warnings"):
+        for item in audit_data.get(key, []):
+            detail_titles.add((item.get("title") or "").strip().lower())
+
+    if not detail_titles:
+        return audit_data
+
+    filtered = []
+    for qw in audit_data.get("quick_wins", []):
+        qw_title = (qw.get("title") or "").strip().lower()
+        # Check if any detail entry title matches or contains the quick win title
+        has_detail = any(
+            qw_title in dt or dt in qw_title
+            for dt in detail_titles
+        )
+        if has_detail:
+            filtered.append(qw)
+        else:
+            logger.info("Removed Quick Win without detail entry: %s", qw.get("title"))
+    audit_data["quick_wins"] = filtered
+    return audit_data
 
 
 # ===========================
@@ -1039,16 +1109,40 @@ def create_excel_report(audit_data: dict, site_name: str) -> BytesIO:
         ws.column_dimensions["F"].width = 35
         ws.column_dimensions["G"].width = 40
 
-    # --- Sheet 1: Critical Errors ---
-    ws_ce = wb.active
-    ws_ce.title = "Critical Errors"
+    # --- Sheet 1: Quick Wins ---
+    ws_qw = wb.active
+    ws_qw.title = "Quick Wins"
+    headers_qw = ["#", "Action", "Impact", "Description"]
+    ws_qw.append(headers_qw)
+    style_header_row(ws_qw, 1, len(headers_qw))
+
+    for i, qw in enumerate(audit_data.get("quick_wins", []), 1):
+        row_num = i + 1
+        row = [
+            i,
+            qw.get("title", ""),
+            qw.get("impact", ""),
+            qw.get("description", ""),
+        ]
+        ws_qw.append(row)
+        for c in range(1, len(row) + 1):
+            style_data_cell(ws_qw, row_num, c)
+        ws_qw.row_dimensions[row_num].height = 45
+
+    ws_qw.column_dimensions["A"].width = 6
+    ws_qw.column_dimensions["B"].width = 40
+    ws_qw.column_dimensions["C"].width = 12
+    ws_qw.column_dimensions["D"].width = 60
+
+    # --- Sheet 2: Critical Errors ---
+    ws_ce = wb.create_sheet("Critical Errors")
     build_issues_sheet(ws_ce, audit_data.get("critical_errors", []))
 
-    # --- Sheet 2: Warnings ---
+    # --- Sheet 3: Warnings ---
     ws_w = wb.create_sheet("Warnings")
     build_issues_sheet(ws_w, audit_data.get("warnings", []))
 
-    # --- Sheet 3: Next Checks ---
+    # --- Sheet 4: Next Checks ---
     ws_nc = wb.create_sheet("Next Checks")
     headers_nc = ["Check", "Description"]
     ws_nc.append(headers_nc)
@@ -1138,7 +1232,7 @@ def render_issue_card(issue: dict, max_urls: int = 3):
     remaining = len(urls) - max_urls
     more_html = ""
     if remaining > 0:
-        more_html = f'<p class="more-in-excel">+{remaining} more URLs — see the downloadable Excel for the full list</p>'
+        more_html = '<p class="more-in-excel">+more URLs — see the downloadable Excel for the full list</p>'
 
     st.markdown(f"""
     <div class="issue-card">
@@ -1205,8 +1299,8 @@ st.markdown("---")
 # URL Input
 url_input = st.text_input(
     "Website URL",
-    placeholder="https://example.com",
-    help="Enter the full URL including https://"
+    placeholder="example.com",
+    help="Enter any URL or domain — e.g. example.com, www.example.com, https://example.com"
 )
 
 st.markdown("---")
@@ -1273,6 +1367,10 @@ with col2:
         if not audit_data:
             st.error("Could not parse audit results. Please try again.")
             st.stop()
+
+        # Post-process: filter alt-text issues and enforce data completeness
+        audit_data = filter_alt_text_issues(audit_data)
+        audit_data = ensure_quick_win_completeness(audit_data)
 
         # Step 3: Create Excel
         status_text.text("Creating report...")
