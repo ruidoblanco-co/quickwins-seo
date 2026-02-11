@@ -68,8 +68,14 @@ Return a single JSON object with exactly these keys:
 CLASSIFICATION RULES:
 - quick_wins: The 5 most impactful improvements that can be done quickly. Prioritize by impact/effort ratio. Use evidence-driven wording (e.g., "Fix duplicate titles affecting ~X URLs").
 - critical_errors: Severity Critical or High findings — things that actively hurt SEO (broken links, missing H1, noindex issues, duplicate content, etc.)
-- warnings: Severity Medium or Low findings — things that should be improved but aren't breaking (long titles, missing alt text, thin content, etc.)
+- warnings: Severity Medium or Low findings — things that should be improved but aren't breaking (long titles, thin content, etc.)
 - next_checks: 5-8 recommendations for deeper analysis that would require more tooling or a larger crawl.
+
+DATA COMPLETENESS (MANDATORY):
+- Every quick_win MUST correspond to a detailed entry in either critical_errors or warnings. The user must be able to find the full details (URLs, evidence, fix instructions) for every quick win.
+- Do NOT include a quick win that has no matching entry in critical_errors or warnings.
+- Do NOT truncate or skip any errors — list ALL URLs affected by each issue, not just a sample.
+- Use plain text only — no HTML tags in any field values.
 
 GUIDANCE for what to flag (only if supported by data):
 - Indexability risks (noindex pages, canonical mismatches, redirect patterns)
@@ -77,9 +83,11 @@ GUIDANCE for what to flag (only if supported by data):
 - H1 missing or multiple H1
 - Thin content patterns (word_count)
 - Broken internal links (count + examples)
-- Missing alt text at scale
 - Missing structured data (if most pages have 0 JSON-LD)
 - hreflang inconsistencies (if relevant and present)
+
+DO NOT report:
+- Missing alt text / image alt attributes — ignore completely, never include in any section
 
 Include real URLs from the data in the "urls" arrays. Include ALL relevant URLs you find in the data (not just 3).
 
