@@ -550,13 +550,10 @@ def fetch_url(url: str, timeout: int = CRAWL_TIMEOUT):
         return None
 
 
-def get_robots_sitemaps(base_url: str) -> list[str]:
-    robots_url = urljoin(base_url.rstrip("/") + "/", "robots.txt")
-    r = fetch_url(robots_url)
-    if not r or r.status_code >= 400:
-        return []
+def _parse_robots_for_sitemaps(robots_text: str) -> list[str]:
+    """Extract Sitemap: directives from robots.txt content."""
     sitemaps = []
-    for line in r.text.splitlines():
+    for line in robots_text.splitlines():
         if line.lower().startswith("sitemap:"):
             sm = line.split(":", 1)[1].strip()
             if sm:
@@ -564,42 +561,113 @@ def get_robots_sitemaps(base_url: str) -> list[str]:
     return list(dict.fromkeys(sitemaps))
 
 
+def get_robots_sitemaps(base_url: str) -> list[str]:
+    """Check robots.txt for Sitemap directives, trying both www and non-www."""
+    parsed = urlparse(base_url)
+    hostname = parsed.hostname or ""
+
+    # Build list of robots.txt URLs to try
+    urls_to_try = [urljoin(base_url.rstrip("/") + "/", "robots.txt")]
+
+    # Also try the www/non-www counterpart
+    if hostname.startswith("www."):
+        alt_base = f"{parsed.scheme}://{hostname[4:]}"
+        urls_to_try.append(urljoin(alt_base.rstrip("/") + "/", "robots.txt"))
+    elif hostname and "." in hostname:
+        alt_base = f"{parsed.scheme}://www.{hostname}"
+        urls_to_try.append(urljoin(alt_base.rstrip("/") + "/", "robots.txt"))
+
+    for robots_url in urls_to_try:
+        r = fetch_url(robots_url)
+        if r and r.status_code < 400:
+            sitemaps = _parse_robots_for_sitemaps(r.text)
+            if sitemaps:
+                logger.info("Found %d sitemap(s) in %s", len(sitemaps), robots_url)
+                return sitemaps
+    return []
+
+
 def try_default_sitemaps(base_url: str) -> list[str]:
-    base = base_url.rstrip("/") + "/"
-    return [
-        urljoin(base, "sitemap.xml"),
-        urljoin(base, "sitemap_index.xml"),
-        urljoin(base, "sitemap-index.xml"),
-        urljoin(base, "sitemap1.xml"),
+    """Generate sitemap candidate URLs for both www and non-www variants."""
+    parsed = urlparse(base_url)
+    hostname = parsed.hostname or ""
+
+    # Build base URLs to try: the original, plus the www/non-www counterpart
+    bases = [base_url.rstrip("/") + "/"]
+    if hostname.startswith("www."):
+        alt = f"{parsed.scheme}://{hostname[4:]}"
+        bases.append(alt.rstrip("/") + "/")
+    elif hostname and "." in hostname:
+        alt = f"{parsed.scheme}://www.{hostname}"
+        bases.append(alt.rstrip("/") + "/")
+
+    # Sitemap filenames ordered by likelihood (index first for WordPress etc.)
+    filenames = [
+        "sitemap_index.xml",
+        "sitemap.xml",
+        "sitemap-index.xml",
+        "sitemap1.xml",
     ]
+
+    candidates = []
+    seen = set()
+    for base in bases:
+        for fname in filenames:
+            url = urljoin(base, fname)
+            if url not in seen:
+                seen.add(url)
+                candidates.append(url)
+    return candidates
 
 
 def parse_sitemap_xml(xml_text: str) -> tuple[list[str], list[str]]:
+    """Parse sitemap XML (with or without namespace) and return (page_urls, child_sitemap_urls)."""
     urls, sitemaps = [], []
+
+    # Quick guard: skip obvious non-XML responses (HTML pages returned as 200)
+    stripped = (xml_text or "").strip()
+    if not stripped or stripped[:5].lower().startswith("<!doc") or stripped[:5].lower().startswith("<html"):
+        return urls, sitemaps
+
     try:
         root = ET.fromstring(xml_text)
     except Exception:
         return urls, sitemaps
 
-    def _tag_endswith(el, name):
-        return el.tag.lower().endswith(name)
+    def _local_name(tag: str) -> str:
+        """Strip namespace prefix from tag, e.g. {http://...}loc -> loc."""
+        if "}" in tag:
+            return tag.split("}", 1)[1].lower()
+        return tag.lower()
 
-    if _tag_endswith(root, "sitemapindex"):
-        for el in root.findall(".//"):
-            if _tag_endswith(el, "loc") and el.text:
+    root_name = _local_name(root.tag)
+
+    if root_name == "sitemapindex":
+        # Sitemap index file — collect child sitemap URLs
+        for el in root.iter():
+            if _local_name(el.tag) == "loc" and el.text:
                 sitemaps.append(el.text.strip())
     else:
-        for el in root.findall(".//"):
-            if _tag_endswith(el, "loc") and el.text:
+        # Regular sitemap — collect page URLs
+        for el in root.iter():
+            if _local_name(el.tag) == "loc" and el.text:
                 urls.append(el.text.strip())
+
     return urls, sitemaps
 
 
 def fetch_sitemap_urls(sitemap_url: str, max_urls: int = MAX_SITEMAP_URLS) -> list[str]:
+    logger.info("Trying sitemap: %s", sitemap_url)
     r = fetch_url(sitemap_url)
-    if not r or r.status_code >= 400:
+    if not r:
+        logger.info("  -> request failed (no response)")
         return []
+    if r.status_code >= 400:
+        logger.info("  -> HTTP %d", r.status_code)
+        return []
+
     urls, sitemaps = parse_sitemap_xml(r.text)
+    logger.info("  -> parsed: %d page URLs, %d child sitemaps", len(urls), len(sitemaps))
     all_urls = list(urls)
 
     for sm in sitemaps[:20]:
