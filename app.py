@@ -208,21 +208,42 @@ st.markdown("""
         margin: -10px 0 20px 0;
     }
 
+    /* Quick Wins container */
+    .qw-container {
+        background: linear-gradient(135deg, #1a2e1a 0%, #0f2818 50%, #162316 100%);
+        border: 1px solid rgba(34, 197, 94, 0.3);
+        border-radius: 14px;
+        padding: 28px 28px 18px 28px;
+        margin-bottom: 28px;
+    }
+    .qw-container-title {
+        font-size: 22px;
+        font-weight: 700;
+        color: #4ade80;
+        margin: 0 0 4px 0;
+    }
+    .qw-container-subtitle {
+        color: #86efac;
+        font-size: 14px;
+        margin: 0 0 20px 0;
+        opacity: 0.8;
+    }
+
     /* Quick Win cards */
     .qw-card {
-        background: rgba(30, 41, 59, 0.7);
-        border-left: 4px solid #f59e0b;
+        background: rgba(34, 197, 94, 0.08);
+        border-left: 4px solid #22c55e;
         border-radius: 8px;
         padding: 18px 22px;
         margin-bottom: 12px;
         transition: background 0.2s;
     }
     .qw-card:hover {
-        background: rgba(30, 41, 59, 0.95);
+        background: rgba(34, 197, 94, 0.15);
     }
     .qw-number {
         display: inline-block;
-        background: #f59e0b;
+        background: #22c55e;
         color: #0f172a;
         font-weight: 700;
         font-size: 13px;
@@ -236,14 +257,30 @@ st.markdown("""
     .qw-title {
         font-size: 16px;
         font-weight: 600;
-        color: #fbbf24;
+        color: #4ade80;
         display: inline;
     }
-    .qw-meta {
-        color: #94a3b8;
-        font-size: 13px;
+    .qw-desc {
+        color: #cbd5e1;
+        font-size: 14px;
+        margin-top: 8px;
+        padding-left: 34px;
+        line-height: 1.5;
+    }
+    .qw-urls {
+        color: #60a5fa;
+        font-size: 12px;
+        font-family: monospace;
         margin-top: 6px;
         padding-left: 34px;
+        word-break: break-all;
+    }
+    .qw-more {
+        color: #86efac;
+        font-size: 12px;
+        font-style: italic;
+        padding-left: 34px;
+        margin-top: 4px;
     }
 
     /* Error / Warning cards inside expanders */
@@ -772,11 +809,6 @@ def extract_page_signals(url: str, base_domain: str) -> dict:
     text = soup.get_text(" ", strip=True)
     word_count = len(text.split())
 
-    hreflang_tags = soup.find_all("link", attrs={
-        "rel": lambda x: x and "alternate" in x.lower(), "hreflang": True
-    })
-    hreflang_count = len(hreflang_tags)
-
     jsonld_tags = soup.find_all("script", attrs={"type": "application/ld+json"})
     jsonld_count = len(jsonld_tags)
 
@@ -803,7 +835,6 @@ def extract_page_signals(url: str, base_domain: str) -> dict:
         "robots_meta": robots_meta,
         "h1_count": h1_count,
         "word_count": word_count,
-        "hreflang_count": hreflang_count,
         "jsonld_count": jsonld_count,
         "sample_internal_links": internal_links,
     }
@@ -845,7 +876,6 @@ def build_site_level_findings(pages: list[dict], base_domain: str) -> tuple[dict
         "canonical_mismatch": 0,
         "thin_pages": 0,
         "pages_with_schema": 0,
-        "pages_with_hreflang": 0,
     }
 
     examples = {
@@ -917,8 +947,6 @@ def build_site_level_findings(pages: list[dict], base_domain: str) -> tuple[dict
 
         if safe_int(p.get("jsonld_count"), 0) > 0:
             summary["pages_with_schema"] += 1
-        if safe_int(p.get("hreflang_count"), 0) > 0:
-            summary["pages_with_hreflang"] += 1
 
     dup_titles = sorted(
         [(t, urls) for t, urls in titles.items() if len(urls) > 1],
@@ -1243,8 +1271,7 @@ def create_excel_report(
     # --- Sheet 1: Quick Wins ---
     ws_qw = wb.active
     ws_qw.title = "Quick Wins"
-    headers_qw = ["#", "Issue", "Pages Affected", "Impact", "Effort (hours)",
-                   "Description", "Why It Matters", "How to Fix"]
+    headers_qw = ["#", "Issue", "Pages Affected", "Description", "Why It Matters", "How to Fix"]
     ws_qw.append(headers_qw)
     style_header_row(ws_qw, 1, len(headers_qw))
 
@@ -1254,8 +1281,6 @@ def create_excel_report(
             i,
             clean_text(qw.title),
             len(qw.urls),
-            f"{qw.impact_score}/10",
-            qw.effort_hours,
             clean_text(qw.description),
             clean_text(qw.why_it_matters),
             clean_text(qw.how_to_fix),
@@ -1268,11 +1293,9 @@ def create_excel_report(
     ws_qw.column_dimensions["A"].width = 6
     ws_qw.column_dimensions["B"].width = 30
     ws_qw.column_dimensions["C"].width = 14
-    ws_qw.column_dimensions["D"].width = 10
-    ws_qw.column_dimensions["E"].width = 12
-    ws_qw.column_dimensions["F"].width = 45
-    ws_qw.column_dimensions["G"].width = 35
-    ws_qw.column_dimensions["H"].width = 40
+    ws_qw.column_dimensions["D"].width = 45
+    ws_qw.column_dimensions["E"].width = 35
+    ws_qw.column_dimensions["F"].width = 40
 
     # --- Sheet 2: Critical Errors ---
     ws_ce = wb.create_sheet("Critical Errors")
@@ -1357,17 +1380,10 @@ def create_word_from_content(audit_content: str, site_name: str) -> BytesIO:
 # ===========================
 # UI RENDERING FUNCTIONS
 # ===========================
-def render_problem_expander(problem, index: int = 0):
+def render_problem_expander(problem, max_urls: int = 3):
     """Render a single Problem using native Streamlit components."""
     label = f"{problem.title} — {len(problem.urls)} pages affected"
     with st.expander(label):
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Impact", f"{problem.impact_score}/10")
-        with col2:
-            st.metric("Effort", f"{problem.effort_hours}h")
-
-        st.write("**What's wrong:**")
         st.write(problem.description)
 
         st.write("**Why it matters:**")
@@ -1377,10 +1393,11 @@ def render_problem_expander(problem, index: int = 0):
         st.write(problem.how_to_fix)
 
         st.write("**Affected URLs:**")
-        for url in problem.urls[:10]:
+        for url in problem.urls[:max_urls]:
             st.code(url, language=None)
-        if len(problem.urls) > 10:
-            st.caption(f"+ {len(problem.urls) - 10} more URLs — see Excel download for full list")
+        remaining = len(problem.urls) - max_urls
+        if remaining > 0:
+            st.caption(f"+ {remaining} more URLs — see the downloadable Excel for the full list")
 
 
 # ===========================
@@ -1407,9 +1424,9 @@ with st.sidebar:
     **Quick Wins** generates SEO audits in seconds.
 
     **Features**:
-    - Lightweight site crawl (robots + sitemap)
-    - Deterministic problem detection (11 rules)
-    - AI-powered executive summary
+    - Full site crawl & analysis
+    - AI-powered insights
+    - Actionable recommendations
     - Downloadable Excel reports
     """)
 
@@ -1423,12 +1440,12 @@ with st.sidebar:
 st.markdown("""
 <div class="app-header">
     <div class="app-title">QUICK WINS</div>
-    <div class="app-subtitle">Instant SEO audits. Crawl any site, detect issues with deterministic rules, and get actionable recommendations in seconds.</div>
+    <div class="app-subtitle">Instant AI-powered SEO audits. Crawl any site, detect issues, and get actionable recommendations in seconds.</div>
 </div>
 """, unsafe_allow_html=True)
 
 # Info box
-st.info("**SEO Audit** — Crawl via robots.txt + sitemap, sample up to 40 pages, detect 11 types of issues deterministically, AI-powered summary.")
+st.info("**SEO Audit** — Crawl your site, analyze pages, detect critical issues, and get AI-powered recommendations.")
 
 st.markdown("---")
 
@@ -1475,7 +1492,7 @@ with col2:
         progress_bar.progress(40)
 
         # ── Step 2: Deterministic detection ──
-        status_text.text("Detecting issues (11 deterministic rules)...")
+        status_text.text("Analyzing pages and detecting issues...")
         progress_bar.progress(50)
 
         pages = audit_context.get("pages", [])
@@ -1582,30 +1599,57 @@ with col2:
         """
         st.markdown(scope_html, unsafe_allow_html=True)
 
-        # --- Quick Wins (native Streamlit) ---
-        if quick_wins:
-            st.markdown('<div class="section-header">&#9889; QUICK WINS</div>', unsafe_allow_html=True)
-            st.markdown('<p class="section-subtitle">Top high-impact, low-effort improvements</p>', unsafe_allow_html=True)
+        # --- Quick Wins (top 3 in styled container) ---
+        top_qw = quick_wins[:3]
+        top_qw_titles = {qw.title for qw in top_qw}
 
-            for i, qw in enumerate(quick_wins[:5], 1):
-                render_problem_expander(qw, index=i)
+        if top_qw:
+            qw_cards_html = ""
+            for i, qw in enumerate(top_qw, 1):
+                urls_html = ""
+                for url in qw.urls[:3]:
+                    urls_html += f'<div>{url}</div>'
+                remaining = len(qw.urls) - 3
+                more_html = ""
+                if remaining > 0:
+                    more_html = f'<div class="qw-more">+{remaining} more — see Excel for full list</div>'
 
-        # --- Critical Errors ---
-        if critical_errors:
-            total_critical_urls = sum(len(p.urls) for p in critical_errors)
-            st.header(f"Critical Errors")
-            st.caption(f"{len(critical_errors)} critical issues affecting {total_critical_urls} URLs")
+                qw_cards_html += f"""
+                <div class="qw-card">
+                    <span class="qw-number">{i}</span>
+                    <span class="qw-title">{safe_html(qw.title)} — {len(qw.urls)} pages</span>
+                    <div class="qw-desc">{safe_html(qw.description)}</div>
+                    <div class="qw-urls">{urls_html}</div>
+                    {more_html}
+                </div>
+                """
 
-            for err in critical_errors:
+            st.markdown(f"""
+            <div class="qw-container">
+                <div class="qw-container-title">&#9889; Quick Wins</div>
+                <div class="qw-container-subtitle">The most impactful improvements you can make right now</div>
+                {qw_cards_html}
+            </div>
+            """, unsafe_allow_html=True)
+
+        # --- Remaining errors (excluding ones already shown as Quick Wins) ---
+        remaining_critical = [p for p in critical_errors if p.title not in top_qw_titles]
+        remaining_warnings = [p for p in warnings_list if p.title not in top_qw_titles]
+
+        if remaining_critical:
+            total_urls = sum(len(p.urls) for p in remaining_critical)
+            st.header("Critical Errors")
+            st.caption(f"{len(remaining_critical)} additional critical issues affecting {total_urls} URLs")
+
+            for err in remaining_critical:
                 render_problem_expander(err)
 
-        # --- Warnings ---
-        if warnings_list:
-            total_warning_urls = sum(len(p.urls) for p in warnings_list)
-            st.header(f"Warnings")
-            st.caption(f"{len(warnings_list)} warnings affecting {total_warning_urls} URLs")
+        if remaining_warnings:
+            total_urls = sum(len(p.urls) for p in remaining_warnings)
+            st.header("Warnings")
+            st.caption(f"{len(remaining_warnings)} warnings affecting {total_urls} URLs")
 
-            for warn in warnings_list:
+            for warn in remaining_warnings:
                 render_problem_expander(warn)
 
         # --- Next Checks ---
