@@ -467,13 +467,15 @@ def safe_int(x, default=0):
 
 
 def clean_text(text: str) -> str:
-    """Decode HTML entities and strip residual HTML tags from text."""
+    """Decode HTML entities and strip ALL HTML tags from text using BeautifulSoup."""
     if not text or not isinstance(text, str):
         return text or ""
     # Decode HTML entities like &lt;p&gt; → <p>
     cleaned = html_module.unescape(text)
-    # Strip any residual HTML tags
-    cleaned = re.sub(r"<[^>]+>", "", cleaned)
+    # Use BeautifulSoup to reliably strip ALL HTML tags (including nested/complex)
+    cleaned = BeautifulSoup(cleaned, "html.parser").get_text()
+    # Collapse extra whitespace
+    cleaned = " ".join(cleaned.split())
     return cleaned.strip()
 
 
@@ -918,6 +920,30 @@ def build_site_level_findings(pages: list[dict], base_domain: str) -> tuple[dict
     return summary, examples
 
 
+_SITEMAP_PRIORITY_BEST = ("sitemap_index.xml", "sitemap.xml", "sitemap-index.xml")
+_SITEMAP_PRIORITY_OK = ("sitemap1.xml", "post-sitemap.xml", "page-sitemap.xml", "wp-sitemap.xml")
+_SITEMAP_PRIORITY_AVOID = ("news-sitemap.xml", "video-sitemap.xml", "image-sitemap.xml")
+
+
+def prioritize_sitemaps(found_sitemaps: list[str]) -> str | None:
+    """Pick the best sitemap URL from a list, preferring index/main over niche."""
+    if not found_sitemaps:
+        return None
+    for sm in found_sitemaps:
+        sm_lower = sm.rsplit("/", 1)[-1].lower()
+        if any(p in sm_lower for p in _SITEMAP_PRIORITY_BEST):
+            return sm
+    for sm in found_sitemaps:
+        sm_lower = sm.rsplit("/", 1)[-1].lower()
+        if any(p in sm_lower for p in _SITEMAP_PRIORITY_OK):
+            return sm
+    for sm in found_sitemaps:
+        sm_lower = sm.rsplit("/", 1)[-1].lower()
+        if any(p in sm_lower for p in _SITEMAP_PRIORITY_AVOID):
+            return sm
+    return found_sitemaps[0]
+
+
 def discover_urls_from_homepage(homepage_url: str, base_domain: str) -> list[str]:
     """Crawl the homepage and extract unique internal links as a sitemap fallback."""
     r = fetch_url(homepage_url)
@@ -966,12 +992,18 @@ def run_basic_audit(url_input: str) -> dict:
 
     discovered_urls = []
     used_sitemap = None
+    # Fetch all sitemaps and pick the best one by priority
+    sitemap_results = {}
     for sm in sitemaps:
         urls = fetch_sitemap_urls(sm, max_urls=MAX_SITEMAP_URLS)
         if urls:
-            discovered_urls = urls
-            used_sitemap = sm
-            break
+            sitemap_results[sm] = urls
+
+    if sitemap_results:
+        best_sm = prioritize_sitemaps(list(sitemap_results.keys()))
+        if best_sm:
+            discovered_urls = sitemap_results[best_sm]
+            used_sitemap = best_sm
 
     homepage = base_url
     if not discovered_urls:
@@ -1318,12 +1350,12 @@ def create_word_from_content(audit_content: str, site_name: str) -> BytesIO:
 # ===========================
 def render_issue_card(issue: dict, max_urls: int = 3):
     """Render a single issue card (for critical errors or warnings)."""
-    title = issue.get("title", "Untitled Issue")
-    desc = issue.get("description", "")
-    evidence = issue.get("evidence", "")
+    title = clean_text(issue.get("title", "Untitled Issue"))
+    desc = clean_text(issue.get("description", ""))
+    evidence = clean_text(issue.get("evidence", ""))
     urls = issue.get("urls", [])
-    why = issue.get("why_it_matters", "")
-    fix = issue.get("how_to_fix", "")
+    why = clean_text(issue.get("why_it_matters", ""))
+    fix = clean_text(issue.get("how_to_fix", ""))
 
     urls_html = ""
     visible_urls = urls[:max_urls]
@@ -1498,7 +1530,7 @@ with col2:
         """, unsafe_allow_html=True)
 
         # --- Executive Summary ---
-        exec_summary = audit_data.get("executive_summary", "")
+        exec_summary = clean_text(audit_data.get("executive_summary", ""))
         if exec_summary:
             st.markdown(f"""
             <div class="info-box">
@@ -1515,8 +1547,8 @@ with col2:
                 <h3>Audit Scope &amp; Method</h3>
                 <p><strong>URLs discovered:</strong> {scope.get('urls_discovered', 'N/A')}</p>
                 <p><strong>URLs analyzed:</strong> {scope.get('urls_analyzed', 'N/A')}</p>
-                <p><strong>Discovery method:</strong> {scope.get('discovery_method', 'N/A')}</p>
-                <p><strong>Limitations:</strong> {scope.get('limitations', 'N/A')}</p>
+                <p><strong>Discovery method:</strong> {clean_text(str(scope.get('discovery_method', 'N/A')))}</p>
+                <p><strong>Limitations:</strong> {clean_text(str(scope.get('limitations', 'N/A')))}</p>
             </div>
             """
             st.markdown(scope_html, unsafe_allow_html=True)
@@ -1528,9 +1560,9 @@ with col2:
             st.markdown('<p class="section-subtitle">The 5 most impactful improvements you can make right now</p>', unsafe_allow_html=True)
 
             for i, qw in enumerate(quick_wins[:5], 1):
-                title = qw.get("title", "")
-                impact = qw.get("impact", "")
-                desc = qw.get("description", "")
+                title = clean_text(qw.get("title", ""))
+                impact = clean_text(qw.get("impact", ""))
+                desc = clean_text(qw.get("description", ""))
                 st.markdown(f"""
                 <div class="qw-card">
                     <span class="qw-number">{i}</span>
@@ -1560,10 +1592,12 @@ with col2:
             st.markdown('<p class="section-subtitle">Deeper analysis to unlock more improvements</p>', unsafe_allow_html=True)
 
             for nc in next_checks:
+                nc_title = clean_text(nc.get('title', ''))
+                nc_desc = clean_text(nc.get('description', ''))
                 st.markdown(f"""
                 <div class="next-card">
-                    <h4>{nc.get('title', '')}</h4>
-                    <p>{nc.get('description', '')}</p>
+                    <h4>{nc_title}</h4>
+                    <p>{nc_desc}</p>
                 </div>
                 """, unsafe_allow_html=True)
 
