@@ -23,6 +23,9 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.utils import get_column_letter
 
+from detector import detect_problems, Problem, normalize_url
+from validator import validate_results
+
 
 # ===========================
 # LOGGING
@@ -1095,15 +1098,29 @@ def run_llm(prompt_text: str) -> str:
     return (getattr(resp, "text", "") or "").strip()
 
 
-def build_prompt(context: dict) -> str:
+def build_prompt(context: dict, detected_problems: dict) -> str:
+    """Build LLM prompt injecting both detected problems and crawl context."""
     p = load_prompt(PROMPT_BASIC).strip()
     if not p:
         p = (
             "You are a senior SEO auditor.\n"
-            "Return ONLY valid JSON with findings and evidence.\n"
+            "Return ONLY valid JSON with executive_summary and next_checks.\n"
+            "DETECTED_PROBLEMS:\n{{DETECTED_PROBLEMS}}\n"
             "CONTEXT_JSON:\n{{CONTEXT_JSON}}\n"
         )
-    return p.replace("{{CONTEXT_JSON}}", json.dumps(context, ensure_ascii=False, indent=2))
+    # Build a concise summary of detected problems for the LLM
+    problems_summary = []
+    for category in ("quick_wins", "critical_errors", "warnings"):
+        for prob in detected_problems.get(category, []):
+            problems_summary.append({
+                "title": prob.title,
+                "severity": prob.severity,
+                "affected_urls": len(prob.urls),
+                "description": prob.description,
+            })
+    p = p.replace("{{DETECTED_PROBLEMS}}", json.dumps(problems_summary, ensure_ascii=False, indent=2))
+    p = p.replace("{{CONTEXT_JSON}}", json.dumps(context, ensure_ascii=False, indent=2))
+    return p
 
 
 def parse_audit_json(raw: str) -> dict:
@@ -1124,62 +1141,21 @@ def parse_audit_json(raw: str) -> dict:
     return clean_audit_data(result)
 
 
-_ALT_TEXT_PATTERN = re.compile(r"\balt[\s-]*(text|attribute|tag|imagen)", re.IGNORECASE)
 
 
-def _is_alt_text_issue(item: dict) -> bool:
-    """Return True if the issue is about missing image alt text."""
-    text = " ".join([
-        item.get("title", ""),
-        item.get("description", ""),
-    ])
-    return bool(_ALT_TEXT_PATTERN.search(text))
-
-
-def filter_alt_text_issues(audit_data: dict) -> dict:
-    """Remove any alt-text related issues from all sections."""
-    for key in ("critical_errors", "warnings", "quick_wins"):
-        items = audit_data.get(key, [])
-        if items:
-            audit_data[key] = [i for i in items if not _is_alt_text_issue(i)]
-    return audit_data
-
-
-def ensure_quick_win_completeness(audit_data: dict) -> dict:
-    """Ensure every Quick Win has a corresponding entry in Critical Errors or Warnings.
-
-    If a Quick Win has no matching detail entry, remove it so users never see
-    a Quick Win they can't find details for.
-    """
-    detail_titles = set()
-    for key in ("critical_errors", "warnings"):
-        for item in audit_data.get(key, []):
-            detail_titles.add((item.get("title") or "").strip().lower())
-
-    if not detail_titles:
-        return audit_data
-
-    filtered = []
-    for qw in audit_data.get("quick_wins", []):
-        qw_title = (qw.get("title") or "").strip().lower()
-        # Check if any detail entry title matches or contains the quick win title
-        has_detail = any(
-            qw_title in dt or dt in qw_title
-            for dt in detail_titles
-        )
-        if has_detail:
-            filtered.append(qw)
-        else:
-            logger.info("Removed Quick Win without detail entry: %s", qw.get("title"))
-    audit_data["quick_wins"] = filtered
-    return audit_data
 
 
 # ===========================
 # EXCEL GENERATION
 # ===========================
-def create_excel_report(audit_data: dict, site_name: str) -> BytesIO:
-    """Create a comprehensive Excel report from audit data."""
+def create_excel_report(
+    quick_wins: list,
+    critical_errors: list,
+    warnings: list,
+    next_checks: list,
+    site_name: str,
+) -> BytesIO:
+    """Create Excel report from Problem objects. One row per affected URL in sheets 2-3."""
     wb = Workbook()
 
     # Styles
@@ -1208,32 +1184,32 @@ def create_excel_report(audit_data: dict, site_name: str) -> BytesIO:
         cell.alignment = Alignment(vertical="top", wrap_text=True)
         return cell
 
-    def build_issues_sheet(ws, items):
-        """Build a Critical Errors or Warnings sheet with checkbox column."""
-        headers = ["\u2713 Done", "Issue", "Description", "Evidence", "URLs",
-                   "Why It Matters", "How to Fix"]
+    def build_issues_sheet(ws, problems: list):
+        """Build Critical Errors or Warnings sheet — one row per affected URL."""
+        headers = ["\u2713 Done", "Issue", "URL", "Description", "Why It Matters", "How to Fix"]
         ws.append(headers)
         style_header_row(ws, 1, len(headers))
 
-        for i, item in enumerate(items, 1):
-            row_num = i + 1
-            urls_str = "\n".join(item.get("urls", []))
-            row = [
-                "\u2610",
-                item.get("title", ""),
-                item.get("description", ""),
-                item.get("evidence", ""),
-                urls_str,
-                item.get("why_it_matters", ""),
-                item.get("how_to_fix", ""),
-            ]
-            ws.append(row)
-            for c in range(1, len(row) + 1):
-                style_data_cell(ws, row_num, c)
-            ws.row_dimensions[row_num].height = 60
+        row_num = 1
+        for problem in problems:
+            for url in problem.urls:
+                row_num += 1
+                row = [
+                    "\u2610",
+                    clean_text(problem.title),
+                    url,
+                    clean_text(problem.description),
+                    clean_text(problem.why_it_matters),
+                    clean_text(problem.how_to_fix),
+                ]
+                ws.append(row)
+                for c in range(1, len(row) + 1):
+                    style_data_cell(ws, row_num, c)
+                ws.row_dimensions[row_num].height = 50
 
         # Checkbox dropdown validation on column A (data rows)
-        if len(items) > 0:
+        data_rows = row_num - 1
+        if data_rows > 0:
             dv = DataValidation(
                 type="list",
                 formula1='"\u2610,\u2611"',
@@ -1241,14 +1217,13 @@ def create_excel_report(audit_data: dict, site_name: str) -> BytesIO:
             )
             dv.error = "Please select a valid option"
             dv.errorTitle = "Invalid input"
-            last_row = len(items) + 1
-            dv.add(f"A2:A{last_row}")
+            dv.add(f"A2:A{row_num}")
             ws.add_data_validation(dv)
 
             # Conditional formatting: green row when checked
             for col_idx in range(1, len(headers) + 1):
                 col_letter = get_column_letter(col_idx)
-                cell_range = f"{col_letter}2:{col_letter}{last_row}"
+                cell_range = f"{col_letter}2:{col_letter}{row_num}"
                 ws.conditional_formatting.add(
                     cell_range,
                     FormulaRule(
@@ -1259,45 +1234,53 @@ def create_excel_report(audit_data: dict, site_name: str) -> BytesIO:
 
         # Column widths
         ws.column_dimensions["A"].width = 8
-        ws.column_dimensions["B"].width = 30
-        ws.column_dimensions["C"].width = 35
-        ws.column_dimensions["D"].width = 35
-        ws.column_dimensions["E"].width = 50
-        ws.column_dimensions["F"].width = 35
-        ws.column_dimensions["G"].width = 40
+        ws.column_dimensions["B"].width = 28
+        ws.column_dimensions["C"].width = 55
+        ws.column_dimensions["D"].width = 40
+        ws.column_dimensions["E"].width = 35
+        ws.column_dimensions["F"].width = 40
 
     # --- Sheet 1: Quick Wins ---
     ws_qw = wb.active
     ws_qw.title = "Quick Wins"
-    headers_qw = ["#", "Action", "Impact", "Description"]
+    headers_qw = ["#", "Issue", "Pages Affected", "Impact", "Effort (hours)",
+                   "Description", "Why It Matters", "How to Fix"]
     ws_qw.append(headers_qw)
     style_header_row(ws_qw, 1, len(headers_qw))
 
-    for i, qw in enumerate(audit_data.get("quick_wins", []), 1):
+    for i, qw in enumerate(quick_wins[:5], 1):
         row_num = i + 1
         row = [
             i,
-            qw.get("title", ""),
-            qw.get("impact", ""),
-            qw.get("description", ""),
+            clean_text(qw.title),
+            len(qw.urls),
+            f"{qw.impact_score}/10",
+            qw.effort_hours,
+            clean_text(qw.description),
+            clean_text(qw.why_it_matters),
+            clean_text(qw.how_to_fix),
         ]
         ws_qw.append(row)
         for c in range(1, len(row) + 1):
             style_data_cell(ws_qw, row_num, c)
-        ws_qw.row_dimensions[row_num].height = 45
+        ws_qw.row_dimensions[row_num].height = 50
 
     ws_qw.column_dimensions["A"].width = 6
-    ws_qw.column_dimensions["B"].width = 40
-    ws_qw.column_dimensions["C"].width = 12
-    ws_qw.column_dimensions["D"].width = 60
+    ws_qw.column_dimensions["B"].width = 30
+    ws_qw.column_dimensions["C"].width = 14
+    ws_qw.column_dimensions["D"].width = 10
+    ws_qw.column_dimensions["E"].width = 12
+    ws_qw.column_dimensions["F"].width = 45
+    ws_qw.column_dimensions["G"].width = 35
+    ws_qw.column_dimensions["H"].width = 40
 
     # --- Sheet 2: Critical Errors ---
     ws_ce = wb.create_sheet("Critical Errors")
-    build_issues_sheet(ws_ce, audit_data.get("critical_errors", []))
+    build_issues_sheet(ws_ce, critical_errors)
 
     # --- Sheet 3: Warnings ---
     ws_w = wb.create_sheet("Warnings")
-    build_issues_sheet(ws_w, audit_data.get("warnings", []))
+    build_issues_sheet(ws_w, warnings)
 
     # --- Sheet 4: Next Checks ---
     ws_nc = wb.create_sheet("Next Checks")
@@ -1305,9 +1288,11 @@ def create_excel_report(audit_data: dict, site_name: str) -> BytesIO:
     ws_nc.append(headers_nc)
     style_header_row(ws_nc, 1, len(headers_nc))
 
-    for i, nc in enumerate(audit_data.get("next_checks", []), 1):
+    for i, nc in enumerate(next_checks, 1):
         row_num = i + 1
-        row = [nc.get("title", ""), nc.get("description", "")]
+        nc_title = nc.get("title", "") if isinstance(nc, dict) else ""
+        nc_desc = nc.get("description", "") if isinstance(nc, dict) else ""
+        row = [clean_text(nc_title), clean_text(nc_desc)]
         ws_nc.append(row)
         for c in range(1, len(row) + 1):
             style_data_cell(ws_nc, row_num, c)
@@ -1372,36 +1357,30 @@ def create_word_from_content(audit_content: str, site_name: str) -> BytesIO:
 # ===========================
 # UI RENDERING FUNCTIONS
 # ===========================
-def render_issue_card(issue: dict, max_urls: int = 3):
-    """Render a single issue card (for critical errors or warnings)."""
-    title = safe_html(issue.get("title", "Untitled Issue"))
-    desc = safe_html(issue.get("description", ""))
-    evidence = safe_html(issue.get("evidence", ""))
-    urls = issue.get("urls", [])
-    why = safe_html(issue.get("why_it_matters", ""))
-    fix = safe_html(issue.get("how_to_fix", ""))
+def render_problem_expander(problem, index: int = 0):
+    """Render a single Problem using native Streamlit components."""
+    label = f"{problem.title} — {len(problem.urls)} pages affected"
+    with st.expander(label):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Impact", f"{problem.impact_score}/10")
+        with col2:
+            st.metric("Effort", f"{problem.effort_hours}h")
 
-    urls_html = ""
-    visible_urls = urls[:max_urls]
-    for u in visible_urls:
-        urls_html += f'<a href="{u}" target="_blank">{u}</a><br>'
+        st.write("**What's wrong:**")
+        st.write(problem.description)
 
-    remaining = len(urls) - max_urls
-    more_html = ""
-    if remaining > 0:
-        more_html = '<p class="more-in-excel">+more URLs — see the downloadable Excel for the full list</p>'
+        st.write("**Why it matters:**")
+        st.write(problem.why_it_matters)
 
-    st.markdown(f"""
-    <div class="issue-card">
-        <h4>{title}</h4>
-        <p>{desc}</p>
-        {f'<p><strong>Evidence:</strong> {evidence}</p>' if evidence else ''}
-        {f'<div class="issue-urls">{urls_html}</div>' if urls_html else ''}
-        {more_html}
-        {f'<p class="issue-detail-label">Why it matters</p><p class="issue-detail-text">{why}</p>' if why else ''}
-        {f'<p class="issue-detail-label">How to fix</p><p class="issue-detail-text">{fix}</p>' if fix else ''}
-    </div>
-    """, unsafe_allow_html=True)
+        st.write("**How to fix:**")
+        st.write(problem.how_to_fix)
+
+        st.write("**Affected URLs:**")
+        for url in problem.urls[:10]:
+            st.code(url, language=None)
+        if len(problem.urls) > 10:
+            st.caption(f"+ {len(problem.urls) - 10} more URLs — see Excel download for full list")
 
 
 # ===========================
@@ -1429,13 +1408,13 @@ with st.sidebar:
 
     **Features**:
     - Lightweight site crawl (robots + sitemap)
-    - On-page signal analysis
-    - AI-powered insights
+    - Deterministic problem detection (11 rules)
+    - AI-powered executive summary
     - Downloadable Excel reports
     """)
 
     st.markdown("---")
-    st.caption("v4.0")
+    st.caption("v5.0")
 
 
 # ===========================
@@ -1444,12 +1423,12 @@ with st.sidebar:
 st.markdown("""
 <div class="app-header">
     <div class="app-title">QUICK WINS</div>
-    <div class="app-subtitle">Instant AI-powered SEO audits. Crawl any site, detect issues, and get actionable recommendations in seconds.</div>
+    <div class="app-subtitle">Instant SEO audits. Crawl any site, detect issues with deterministic rules, and get actionable recommendations in seconds.</div>
 </div>
 """, unsafe_allow_html=True)
 
 # Info box
-st.info("**SEO Audit** — Crawl via robots.txt + sitemap, sample analysis, duplicates & indexability checks, AI-powered findings.")
+st.info("**SEO Audit** — Crawl via robots.txt + sitemap, sample up to 40 pages, detect 11 types of issues deterministically, AI-powered summary.")
 
 st.markdown("---")
 
@@ -1467,10 +1446,6 @@ col1, col2, col3 = st.columns([1, 2, 1])
 
 with col2:
     if st.button("Audit Now!", disabled=not url_input, use_container_width=True):
-        if not GEMINI_AVAILABLE:
-            st.error("AI engine is not configured. Please check the system configuration.")
-            st.stop()
-
         # Validate URL
         is_valid, result = validate_url(url_input)
         if not is_valid:
@@ -1486,9 +1461,9 @@ with col2:
         domain = normalize_domain(clean_url)
         site_name = domain or clean_url.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
 
-        # Step 1: Crawl & analyze
+        # ── Step 1: Crawl ──
         status_text.text("Discovering pages (robots/sitemap) and sampling URLs...")
-        progress_bar.progress(20)
+        progress_bar.progress(15)
 
         try:
             audit_context = run_basic_audit(clean_url)
@@ -1497,43 +1472,77 @@ with col2:
             st.error(f"Audit crawl failed: {e}")
             st.stop()
 
-        status_text.text("Taking homepage snapshot...")
         progress_bar.progress(40)
 
-        site_data = analyze_basic_site(clean_url)
-        if isinstance(site_data, dict) and "error" in site_data:
-            st.error(f"Error analyzing homepage: {site_data['error']}")
-            st.stop()
+        # ── Step 2: Deterministic detection ──
+        status_text.text("Detecting issues (11 deterministic rules)...")
+        progress_bar.progress(50)
 
-        # Step 2: Generate AI content
-        status_text.text("Analyzing data and generating insights...")
+        pages = audit_context.get("pages", [])
+        broken_examples = audit_context.get("examples", {}).get("broken_links", [])
+
+        detected = detect_problems(
+            pages=pages,
+            broken_link_examples=broken_examples,
+            thin_content_threshold=THIN_CONTENT_THRESHOLD,
+        )
+
+        quick_wins = detected["quick_wins"]
+        critical_errors = detected["critical_errors"]
+        warnings_list = detected["warnings"]
+
+        # ── Step 3: Validate results ──
+        status_text.text("Validating results...")
         progress_bar.progress(60)
 
-        context = audit_context.copy()
-        context["basic_onpage"] = site_data
-
         try:
-            prompt_text = build_prompt(context)
-            raw_response = run_llm(prompt_text)
-            audit_data = parse_audit_json(raw_response)
-        except Exception as e:
-            logger.error("AI generation failed: %s", e)
-            st.error(f"AI analysis failed: {e}")
+            validate_results(quick_wins, critical_errors, warnings_list)
+        except ValueError as e:
+            logger.error("Validation failed: %s", e)
+            st.error(f"Results validation failed. Please report this issue.\n\n{e}")
             st.stop()
 
-        if not audit_data:
-            st.error("Could not parse audit results. Please try again.")
-            st.stop()
+        # ── Step 4: AI enrichment (executive summary + next checks) ──
+        exec_summary = ""
+        next_checks = []
 
-        # Post-process: filter alt-text issues and enforce data completeness
-        audit_data = filter_alt_text_issues(audit_data)
-        audit_data = ensure_quick_win_completeness(audit_data)
+        if GEMINI_AVAILABLE:
+            status_text.text("Generating AI-powered summary...")
+            progress_bar.progress(70)
 
-        # Step 3: Create Excel
+            try:
+                prompt_text = build_prompt(audit_context, detected)
+                raw_response = run_llm(prompt_text)
+                llm_data = parse_audit_json(raw_response)
+                exec_summary = clean_text(llm_data.get("executive_summary", ""))
+                next_checks = llm_data.get("next_checks", [])
+            except Exception as e:
+                logger.warning("AI enrichment failed (non-fatal): %s", e)
+                exec_summary = (
+                    f"Audited {audit_context.get('urls_analyzed', 0)} pages from {site_name} "
+                    f"(discovered {audit_context.get('urls_discovered', 0)} via "
+                    f"{audit_context.get('discovery_method', 'sitemap')}). "
+                    f"Found {len(critical_errors)} critical issues and {len(warnings_list)} warnings."
+                )
+        else:
+            exec_summary = (
+                f"Audited {audit_context.get('urls_analyzed', 0)} pages from {site_name} "
+                f"(discovered {audit_context.get('urls_discovered', 0)} via "
+                f"{audit_context.get('discovery_method', 'sitemap')}). "
+                f"Found {len(critical_errors)} critical issues and {len(warnings_list)} warnings."
+            )
+
+        # ── Step 5: Create Excel ──
         status_text.text("Creating report...")
         progress_bar.progress(85)
 
-        excel_file = create_excel_report(audit_data, site_name)
+        excel_file = create_excel_report(
+            quick_wins=quick_wins,
+            critical_errors=critical_errors,
+            warnings=warnings_list,
+            next_checks=next_checks,
+            site_name=site_name,
+        )
 
         progress_bar.progress(100)
         status_text.text("Complete!")
@@ -1543,87 +1552,83 @@ with col2:
         status_text.empty()
 
         # ===========================
-        # RESULTS DISPLAY
+        # RESULTS DISPLAY (native Streamlit components)
         # ===========================
 
         # --- Audit Banner ---
         st.markdown(f"""
         <div class="audit-banner">
-            <h2>SEO AUDIT — {site_name}</h2>
+            <h2>SEO AUDIT — {safe_html(site_name)}</h2>
         </div>
         """, unsafe_allow_html=True)
 
         # --- Executive Summary ---
-        exec_summary = safe_html(audit_data.get("executive_summary", ""))
         if exec_summary:
             st.markdown(f"""
             <div class="info-box">
                 <h3>Executive Summary</h3>
-                <p>{exec_summary}</p>
+                <p>{safe_html(exec_summary)}</p>
             </div>
             """, unsafe_allow_html=True)
 
-        # --- Audit Scope & Method ---
-        scope = audit_data.get("audit_scope", {})
-        if scope:
-            scope_html = f"""
-            <div class="info-box">
-                <h3>Audit Scope &amp; Method</h3>
-                <p><strong>URLs discovered:</strong> {scope.get('urls_discovered', 'N/A')}</p>
-                <p><strong>URLs analyzed:</strong> {scope.get('urls_analyzed', 'N/A')}</p>
-                <p><strong>Discovery method:</strong> {safe_html(str(scope.get('discovery_method', 'N/A')))}</p>
-                <p><strong>Limitations:</strong> {safe_html(str(scope.get('limitations', 'N/A')))}</p>
-            </div>
-            """
-            st.markdown(scope_html, unsafe_allow_html=True)
+        # --- Audit Scope (from crawl context, not LLM) ---
+        scope_html = f"""
+        <div class="info-box">
+            <h3>Audit Scope &amp; Method</h3>
+            <p><strong>URLs discovered:</strong> {audit_context.get('urls_discovered', 'N/A')}</p>
+            <p><strong>URLs analyzed:</strong> {audit_context.get('urls_analyzed', 'N/A')}</p>
+            <p><strong>Discovery method:</strong> {safe_html(str(audit_context.get('discovery_method', 'N/A')))}</p>
+        </div>
+        """
+        st.markdown(scope_html, unsafe_allow_html=True)
 
-        # --- Quick Wins ---
-        quick_wins = audit_data.get("quick_wins", [])
+        # --- Quick Wins (native Streamlit) ---
         if quick_wins:
             st.markdown('<div class="section-header">&#9889; QUICK WINS</div>', unsafe_allow_html=True)
-            st.markdown('<p class="section-subtitle">The 5 most impactful improvements you can make right now</p>', unsafe_allow_html=True)
+            st.markdown('<p class="section-subtitle">Top high-impact, low-effort improvements</p>', unsafe_allow_html=True)
 
             for i, qw in enumerate(quick_wins[:5], 1):
-                title = safe_html(qw.get("title", ""))
-                impact = safe_html(qw.get("impact", ""))
-                desc = safe_html(qw.get("description", ""))
-                st.markdown(f"""
-                <div class="qw-card">
-                    <span class="qw-number">{i}</span>
-                    <span class="qw-title">{title}</span>
-                    <div class="qw-meta">Impact: {impact} &bull; {desc}</div>
-                </div>
-                """, unsafe_allow_html=True)
+                render_problem_expander(qw, index=i)
 
         # --- Critical Errors ---
-        critical = audit_data.get("critical_errors", [])
-        if critical:
-            with st.expander(f"🚨 CRITICAL ERRORS — {len(critical)} issues", expanded=False):
-                for err in critical:
-                    render_issue_card(err, max_urls=3)
+        if critical_errors:
+            total_critical_urls = sum(len(p.urls) for p in critical_errors)
+            st.header(f"Critical Errors")
+            st.caption(f"{len(critical_errors)} critical issues affecting {total_critical_urls} URLs")
+
+            for err in critical_errors:
+                render_problem_expander(err)
 
         # --- Warnings ---
-        warnings = audit_data.get("warnings", [])
-        if warnings:
-            with st.expander(f"⚠️ WARNINGS — {len(warnings)} issues", expanded=False):
-                for warn in warnings:
-                    render_issue_card(warn, max_urls=3)
+        if warnings_list:
+            total_warning_urls = sum(len(p.urls) for p in warnings_list)
+            st.header(f"Warnings")
+            st.caption(f"{len(warnings_list)} warnings affecting {total_warning_urls} URLs")
+
+            for warn in warnings_list:
+                render_problem_expander(warn)
 
         # --- Next Checks ---
-        next_checks = audit_data.get("next_checks", [])
         if next_checks:
             st.markdown('<div class="section-header">&#128270; NEXT CHECKS</div>', unsafe_allow_html=True)
             st.markdown('<p class="section-subtitle">Deeper analysis to unlock more improvements</p>', unsafe_allow_html=True)
 
             for nc in next_checks:
-                nc_title = safe_html(nc.get('title', ''))
-                nc_desc = safe_html(nc.get('description', ''))
+                nc_title = safe_html(nc.get('title', '')) if isinstance(nc, dict) else ''
+                nc_desc = safe_html(nc.get('description', '')) if isinstance(nc, dict) else ''
                 st.markdown(f"""
                 <div class="next-card">
                     <h4>{nc_title}</h4>
                     <p>{nc_desc}</p>
                 </div>
                 """, unsafe_allow_html=True)
+
+        # --- No issues found ---
+        if not quick_wins and not critical_errors and not warnings_list:
+            st.success(
+                "No significant SEO issues detected in the sampled pages. "
+                "This is a good sign! Consider running a deeper crawl for a more comprehensive audit."
+            )
 
         # --- Action Buttons ---
         st.markdown("---")
@@ -1632,7 +1637,7 @@ with col2:
 
         with btn_col1:
             st.download_button(
-                label="📥 Download Excel",
+                label="Download Full Report (Excel)",
                 data=excel_file,
                 file_name=f"SEO_Audit_{site_name}_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1640,5 +1645,5 @@ with col2:
             )
 
         with btn_col2:
-            if st.button("🔄 New Audit", use_container_width=True):
+            if st.button("New Audit", use_container_width=True):
                 st.rerun()
