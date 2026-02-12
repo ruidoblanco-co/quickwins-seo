@@ -601,10 +601,11 @@ def try_default_sitemaps(base_url: str) -> list[str]:
         alt = f"{parsed.scheme}://www.{hostname}"
         bases.append(alt.rstrip("/") + "/")
 
-    # Sitemap filenames ordered by likelihood (index first for WordPress etc.)
+    # Sitemap filenames ordered by likelihood
     filenames = [
         "sitemap_index.xml",
         "sitemap.xml",
+        "wp-sitemap.xml",
         "sitemap-index.xml",
         "sitemap1.xml",
     ]
@@ -917,6 +918,30 @@ def build_site_level_findings(pages: list[dict], base_domain: str) -> tuple[dict
     return summary, examples
 
 
+def discover_urls_from_homepage(homepage_url: str, base_domain: str) -> list[str]:
+    """Crawl the homepage and extract unique internal links as a sitemap fallback."""
+    r = fetch_url(homepage_url)
+    if not r or r.status_code >= 400:
+        return []
+    soup = BeautifulSoup(r.text, "html.parser")
+    urls = []
+    seen = {homepage_url, homepage_url.rstrip("/"), homepage_url + "/"}
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        abs_url = href if href.startswith(("http://", "https://")) else urljoin(homepage_url, href)
+        # Strip fragment
+        abs_url = abs_url.split("#")[0]
+        if not abs_url or abs_url in seen:
+            continue
+        if normalize_domain(abs_url) == base_domain:
+            seen.add(abs_url)
+            urls.append(abs_url)
+    logger.info("Homepage link discovery found %d internal URLs", len(urls))
+    return urls
+
+
 def run_basic_audit(url_input: str) -> dict:
     base_domain = normalize_domain(url_input)
     if not base_domain:
@@ -950,9 +975,17 @@ def run_basic_audit(url_input: str) -> dict:
 
     homepage = base_url
     if not discovered_urls:
-        sample_urls = [homepage]
-        discovery_method = "homepage_only (no sitemap found)"
-        urls_discovered_count = 1
+        # Fallback: discover internal links from the homepage
+        logger.info("No sitemap found — falling back to homepage link discovery")
+        discovered_urls = discover_urls_from_homepage(homepage, base_domain)
+        if discovered_urls:
+            discovery_method = "homepage_links (no sitemap found)"
+            urls_discovered_count = len(discovered_urls)
+            sample_urls = pick_sample_urls(discovered_urls, homepage, max_pages=MAX_PAGES)
+        else:
+            sample_urls = [homepage]
+            discovery_method = "homepage_only (no sitemap found)"
+            urls_discovered_count = 1
     else:
         sample_urls = pick_sample_urls(discovered_urls, homepage, max_pages=MAX_PAGES)
         discovery_method = f"robots/sitemap ({used_sitemap})"
