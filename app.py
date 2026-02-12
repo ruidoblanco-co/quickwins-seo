@@ -690,7 +690,8 @@ def parse_sitemap_xml(xml_text: str) -> tuple[list[str], list[str]]:
 
     try:
         root = ET.fromstring(xml_text)
-    except Exception:
+    except Exception as e:
+        logger.warning("  -> XML parse failed: %s", e)
         return urls, sitemaps
 
     def _local_name(tag: str) -> str:
@@ -725,7 +726,19 @@ def fetch_sitemap_urls(sitemap_url: str, max_urls: int = MAX_SITEMAP_URLS) -> li
         logger.info("  -> HTTP %d", r.status_code)
         return []
 
-    urls, sitemaps = parse_sitemap_xml(r.text)
+    # Skip non-XML responses (e.g. redirected to HTML page)
+    content_type = (r.headers.get("Content-Type") or "").lower()
+    if content_type and "xml" not in content_type and "text/plain" not in content_type:
+        logger.info("  -> skipped: Content-Type is '%s' (not XML)", content_type)
+        return []
+
+    # Skip empty responses
+    body = (r.text or "").strip()
+    if not body:
+        logger.info("  -> skipped: response body is empty")
+        return []
+
+    urls, sitemaps = parse_sitemap_xml(body)
     logger.info("  -> parsed: %d page URLs, %d child sitemaps", len(urls), len(sitemaps))
     all_urls = list(urls)
 
@@ -1382,15 +1395,15 @@ def create_word_from_content(audit_content: str, site_name: str) -> BytesIO:
 # ===========================
 def render_problem_expander(problem, max_urls: int = 3):
     """Render a single Problem using native Streamlit components."""
-    label = f"{problem.title} — {len(problem.urls)} pages affected"
+    label = f"{clean_text(problem.title)} — {len(problem.urls)} pages affected"
     with st.expander(label):
-        st.write(problem.description)
+        st.write(clean_text(problem.description))
 
         st.write("**Why it matters:**")
-        st.write(problem.why_it_matters)
+        st.write(clean_text(problem.why_it_matters))
 
         st.write("**How to fix:**")
-        st.write(problem.how_to_fix)
+        st.write(clean_text(problem.how_to_fix))
 
         st.write("**Affected URLs:**")
         for url in problem.urls[:max_urls]:
